@@ -1,0 +1,146 @@
+_target_: policy_models.datasets.hulc_data_module.HulcDataModule
+_recursive_: false
+
+datasets:
+  lang_dataset:
+    _target_: policy_models.datasets.disk_dataset.ExtendedDiskDataset
+    key: "lang"
+    save_format: "npz"
+    batch_size: ${batch_size}
+    min_window_size: ${min_window_size}
+    max_window_size: ${max_window_size}
+    proprio_state: ${datamodule.proprioception_dims}
+    obs_space: ${datamodule.observation_space}
+    skip_frames: 1
+    pad: false
+    lang_folder: ${lang_folder}
+    aux_lang_loss_window: 8
+    num_workers: ${num_workers}
+    geometric_p_value: 0.1
+    window_sampling_strategy: ${window_sampling_strategy}
+    action_seq_len: ${act_seq_len}
+    obs_seq_len: ${obs_seq_len}
+    future_range: ${future_range}
+    img_gen_frame_diff: ${img_gen_frame_diff}
+    future_k_min: 1
+    future_k_max: 4
+
+transforms:
+  train:
+    rgb_static:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    rgb_left_shoulder:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    rgb_right_shoulder:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    rgb_gripper:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    robot_obs:
+      - _target_: policy_models.utils.transforms.NormalizeVector
+      - _target_: policy_models.utils.transforms.AddGaussianNoise
+        mean: [0.0]
+        std: [0.01]
+    scene_obs:
+      - _target_: policy_models.utils.transforms.NormalizeVector
+      - _target_: policy_models.utils.transforms.AddGaussianNoise
+        mean: [0.0]
+        std: [0.01]
+    language:
+      - _target_: policy_models.utils.transforms.AddGaussianNoise
+        mean: [0.0]
+        std: [0.01]
+  val:
+    rgb_static:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    rgb_left_shoulder:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    rgb_right_shoulder:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    rgb_gripper:
+      - _target_: torchvision.transforms.Resize
+        size: 256
+        antialias: True
+      - _target_: policy_models.utils.transforms.ScaleImageTensor
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.5, 0.5, 0.5]
+        std: [0.5, 0.5, 0.5]
+    robot_obs:
+      - _target_: policy_models.utils.transforms.NormalizeVector
+    scene_obs:
+      - _target_: policy_models.utils.transforms.NormalizeVector
+
+root_data_dir: ${root_data_dir}
+action_space: 8
+action_max: [99., 99., 99., 71., 71., 71., 1., 1.]
+action_min: [0., 0., 0., 0., 0., 0., 0., 0.]
+shuffle_val: false
+
+use_half_data: false
+
+observation_space:
+  rgb_obs: ['rgb_static', 'rgb_left_shoulder', 'rgb_right_shoulder', 'rgb_gripper']
+  depth_obs: ['depth_front', 'depth_left_shoulder', 'depth_right_shoulder', 'depth_wrist']
+  point_cloud_obs: ['pcd_front', 'pcd_left_shoulder', 'pcd_right_shoulder', 'pcd_wrist']
+  camera_obs:
+    [
+      'front_camera_intrinsics',
+      'front_camera_extrinsics',
+      'left_shoulder_camera_intrinsics',
+      'left_shoulder_camera_extrinsics',
+      'right_shoulder_camera_intrinsics',
+      'right_shoulder_camera_extrinsics',
+      'wrist_camera_intrinsics',
+      'wrist_camera_extrinsics',
+    ]
+  state_obs: ['robot_obs']
+  actions: ['actions_bridge']
+  language: ['language']
+
+proprioception_dims:
+  n_state_obs: 8
+  keep_indices: [[0, 8]]
+  robot_orientation_idx: [3, 6]
+  normalize: True
+  normalize_robot_orientation: True

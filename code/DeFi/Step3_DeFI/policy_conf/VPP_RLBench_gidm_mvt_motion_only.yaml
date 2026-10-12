@@ -1,0 +1,98 @@
+defaults:
+  - datamodule: rlbench_bridge
+  - _self_
+
+ckpt_path:
+root_data_dir:
+train_folder:
+lang_folder: lang_clip_resnet50
+
+min_window_size: 21
+max_window_size: 50
+future_range: 29
+seed: 242
+batch_size: 4
+max_epochs: 1
+log_every: 50
+window_sampling_strategy: 'geometric'
+num_workers: 8
+img_gen_frame_diff: 3
+
+act_seq_len: 1
+obs_seq_len: 1
+
+model:
+  _target_: policy_models.RLBench_gidm_mvt_policy.RLBenchGIDMMVTPolicy
+  _recursive_: false
+  latent_dim: 384
+  multistep: 1
+  use_lr_scheduler: true
+  act_window_size: ${act_seq_len}
+  obs_seq_len: ${obs_seq_len}
+  action_dim: 9
+  action_seq_len: ${act_seq_len}
+  action_head_type: rlbench_bridge
+  waypoint_hidden_dim: 512
+  seed: ${seed}
+  t5_model_path:
+  language_goal_path: ckpt/ViT-B-32.pt
+  local_delta_max: 0.04
+  lambda_action: 1.0
+  lambda_future: 0.5
+  lambda_motion: 0.2
+  lambda_gripper: 0.2
+  lambda_collision: 0.1
+  future_mode: gt
+  freeze_action_head: false
+  bridge_ckpt_path: ""
+  freeze_bridge_mvt: false
+  freeze_bridge_encoder: true
+  train_motion_only: true
+  bridge_aux_scale: 0.05
+  motion_bridge_scale: 0.1
+  scene_bounds: [-0.3, -0.5, 0.6, 0.7, 0.5, 1.6]
+  mvt_cfg_overrides:
+    depth: 8
+    img_size: 224
+    img_feat_dim: 3
+    feat_dim: 220
+    im_channels: 64
+    activation: lrelu
+    decoder_dropout: 0.0
+    img_patch_size: 14
+    final_dim: 64
+    self_cross_ver: 1
+    add_corr: true
+    norm_corr: false
+    add_pixel_loc: true
+    add_depth: true
+    rend_three_views: false
+    use_point_renderer: true
+    pe_fix: true
+    feat_ver: 0
+    wpt_img_aug: 0.01
+    inp_pre_pro: true
+    inp_pre_con: true
+    cvx_up: false
+    xops: false
+    rot_ver: 0
+    stage_two: false
+    st_sca: 4
+    st_wpt_loc_aug: 0.05
+    st_wpt_loc_inp_no_noise: false
+    img_aug_2: 0.0
+    load_pretrain: false
+    pretrain_path: null
+  optimizer:
+    _target_: torch.optim.AdamW
+    transformer_weight_decay: 0.05
+    learning_rate: 1e-4
+    betas: [0.9, 0.9]
+  lr_scheduler:
+    lr_scheduler:
+      init_lr: 1e-4
+      init_lr_scale: 0.1
+      final_lr_scale: 1e-6
+      total_steps: 50000
+      phase_ratio: "(0.02, 0.08, 0.9)"
+      lr: 1e-4
