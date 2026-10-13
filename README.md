@@ -80,20 +80,7 @@ bash scripts/train_calvin.sh \
 
 BridgeVLA/RLBench original training entry exists at `code/BridgeVLA/finetune/RLBench/train.sh`, but it still contains placeholder paths and the Python code has old hardcoded replay/data roots in `utils/peract_utils_rlbench.py`. For the current paper bundle, BridgeVLA is preserved primarily for evaluation with the local `model_80.pth` checkpoint.
 
-## Expected Paper-Scale Numbers
 
-CALVIN paper target is about 4.62 average length on 1000 sequences.
 
-L-CALVIN paper target is about 8.4 average length on 100 sequences.
-
-BridgeVLA/RLBench paper target is about 88.8 average success rate over 18 tasks x 50 episodes.
-
-## Notes
-
-The CALVIN/L-CALVIN command scripts still use absolute paths under `/mnt/workspace/manipulation` and `/mnt/workspace/calvin`. This is intentional for the current machine. When migrating, update the paths in the two script files or keep the same mount layout.
-
-For BridgeVLA offline loading, keep the variables in `configs/rlbench_92_suffix.env`, especially `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and `BRIDGEVLA_PALIGEMMA_PATH`.
-
-The active Python environment for the commands above is `env/defi_venv`. The `env/bridgevla_eval311` link is historical and is not used by the current commands.
 
 `code/BridgeVLA/finetune/GemBench` is kept because the RLBench agent imports it at runtime, even though GemBench is not one of the final reported environments.
