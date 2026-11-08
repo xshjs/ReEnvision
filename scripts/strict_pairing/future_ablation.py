@@ -65,7 +65,11 @@ def main():
     import torch
     if not torch.cuda.is_available():raise SystemExit('Use a GPU terminal; --dry-run is available on CPU')
     a.output.mkdir(parents=True)
+    from future_compat import prepare_tcn_checkpoint
+    runtime_tcn,tcn_compat=prepare_tcn_checkpoint(files['tcn'],a.output/'tcn_loader_compat.pt')
+    runtime_tcn=runtime_tcn.resolve()
     manifest=dict(cells=cells,checkpoints={k:str(v) for k,v in files.items()},
+        runtime_tcn=str(runtime_tcn),tcn_loader_compatibility=tcn_compat,
         checkpoint_sha256={k:hashlib.sha256(v.read_bytes()).hexdigest() for k,v in files.items()},
         evaluator_sha256=hashlib.sha256(SOURCE.read_bytes()).hexdigest(),frozen_weights=True,
         training_performed=False,oracle_available=False,
@@ -83,7 +87,7 @@ def main():
             FUTURE_INTERVENTION=cell['intervention'],FUTURE_SEED=str(cell['seed']),STRICT_PYTHON=sys.executable,
             PYTHON_BIN=str(HERE/'future_dispatch.sh'),CHECKPOINT_PATH=str(files['checkpoint']),ACTION_MODEL_FOLDER=str(files['checkpoint'].parent.parent),
             JOINT_BELIEF_TRANSITION_CKPT=str(files['belief_checkpoint']),JOINT_PAIR_ACTION_GENERATOR_CKPT=str(files['action_generator_checkpoint']),
-            DIRECTIONAL_SENSITIVITY_TCN='1',DIRECTIONAL_SENSITIVITY_TCN_CKPT=str(files['tcn']),DIRECT_ACTION_CORRECTION_TCN='0',
+            DIRECTIONAL_SENSITIVITY_TCN='1',DIRECTIONAL_SENSITIVITY_TCN_CKPT=str(runtime_tcn),DIRECT_ACTION_CORRECTION_TCN='0',
             LINEAR_SUFFIX_SENSITIVITY='0',DEFI_SUFFIX_SENSITIVITY_CACHE='0',COLLECT_SENSITIVITY_TEACHER='0',
             SUFFIX_MASK_ABLATION_MODE='off',DYNAMIC_COUPLING_FIRST_PASS='1',DISABLE_RETRY_AFTER_FIRST_PASS='1',
             NUM_SEQUENCES=str(a.sequences),EP_LEN=str(cell['episode_steps']),EVAL_SEQUENCES_PATH=cell['sequence_file'],
