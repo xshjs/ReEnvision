@@ -24,11 +24,11 @@ def task_vector(task):
     return (np.frombuffer(digest,dtype=np.uint8).astype(np.float32)/127.5-1)
 
 
-def load(run,min_pairs,min_sequences):
+def load(run,min_pairs,min_sequences,all_outcomes=False):
     if (run/'fatal.json').exists():raise ValueError('Fatal replay error: dataset not approved')
     if not (run/'collection_summary.json').exists():raise ValueError('Collection has not completed successfully')
     rows=[json.loads(s) for s in (run/'pairs.jsonl').read_text().splitlines()]
-    good=[r for r in rows if r['accepted']]
+    good=rows if all_outcomes else [r for r in rows if r['accepted']]
     for r in good:
         if r.get('protocol_version')!=5 or r.get('return_type')!='binary_full_remaining_chain_success':
             raise ValueError('Recollect data: only cache-anchored binary full-chain protocol v5 is supported')
@@ -36,18 +36,25 @@ def load(run,min_pairs,min_sequences):
             raise ValueError('Missing original-cache/candidate provenance')
         if not r.get('full_remaining_chain_return') or r.get('return_gamma')!=1.:
             raise ValueError('Only undiscounted binary FULL remaining-chain returns are supported')
-        if r.get('all_remaining_succeeded_prior') or not r.get('all_remaining_succeeded_post'):
+        if not all_outcomes and (r.get('all_remaining_succeeded_prior') or not r.get('all_remaining_succeeded_post')):
             raise ValueError('Both success/failure ties must not be accepted')
     if len(good)<min_pairs:raise ValueError(f'Only {len(good)} accepted pairs; require {min_pairs}. Collect more, do not weaken return filter.')
     seqs=sorted({r['sequence'] for r in good})
     if len(seqs)<min_sequences:raise ValueError(f'Only {len(seqs)} independent sequences; require {min_sequences}')
     out={k:[] for k in ['state','belief','delta_belief','action','target','task','meta','mask','sequence']}
+    if all_outcomes:out['outcome']=[]
     for r in good:
-        if not accept_binary_repair(r['returns_prior'],r['returns_post']):raise ValueError('Only original failure -> candidate success is positive')
+        if not all_outcomes and not accept_binary_repair(r['returns_prior'],r['returns_post']):raise ValueError('Only original failure -> candidate success is positive')
         with np.load(run/r['file']) as z:
             if not np.array_equal(z['returns_prior'],r['returns_prior']) or not np.array_equal(z['returns_post'],r['returns_post']):
                 raise ValueError('Manifest/NPZ return mismatch')
-            if not accept_binary_repair(z['returns_prior'],z['returns_post']):raise ValueError('Invalid measured binary return pair')
+            if all_outcomes:
+                from outcome import classify_outcome
+                label=classify_outcome(z['returns_prior'],z['returns_post'])
+                from outcome import LABELS
+                if r.get('outcome',LABELS[label])!=LABELS[label]:raise ValueError('Outcome label conflicts with measured returns')
+                out['outcome'].append(label)
+            elif not accept_binary_repair(z['returns_prior'],z['returns_post']):raise ValueError('Invalid measured binary return pair')
             for side in ['prior','post']:
                 trace=z['rewards_'+side]
                 if len(trace)>r.get('return_horizon',r['horizon']):raise ValueError('Return trace exceeds evaluation budget')

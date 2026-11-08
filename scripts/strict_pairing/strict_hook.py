@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from strict_core import BulletSnapshot,RNG,PolicyRuntime,array_hash,accept_binary_repair,rollout_remaining_chain
 from cache_anchor import install_capture,anchored_pair,CacheMismatch
+from outcome import classify_outcome,LABELS
 
 
 class CollectionComplete(BaseException):pass
@@ -134,6 +135,7 @@ def install(ns):
             ret0=[r['return_value'] for r in rec[0]];ret1=[r['return_value'] for r in rec[1]]
             valid_suffix_steps=min(rec[0][0]['suffix_executed'],rec[1][0]['suffix_executed'])
             accepted=accept_binary_repair(ret0,ret1)
+            outcome=LABELS[classify_outcome(ret0,ret1)]
             identity=(int(kw['sequence_index']),int(kw['subtask_index']),int(kw['step']))
             # All attempted pairs retained, including ties and regressions.
             file=root/f'pair_{count:06d}.npz'
@@ -163,7 +165,9 @@ def install(ns):
                 endpoint_prior=rec[0][0]['endpoint'],endpoint_post=rec[1][0]['endpoint'],physics_start=snapshot.start,
                 noise=original_noise.cpu().numpy(),**capture_arrays)
             info=dict(pair=count,sequence=identity[0],subtask=identity[1],step=identity[2],task=task,
-                file=file.name,accepted=accepted,returns_prior=ret0,returns_post=ret1,
+                file=file.name,accepted=accepted,outcome=outcome,training_eligible=True,returns_prior=ret0,returns_post=ret1,
+                completion_steps_prior=len(rec[0][0]['actions']),completion_steps_post=len(rec[1][0]['actions']),
+                correction_l2=float(np.linalg.norm(a1-a0)),correction_max=float(np.abs(a1-a0).max()),
                 snapshot_hash=array_hash(snapshot.start),noise_hash=array_hash(original_noise.cpu().numpy()),
                 observation_condition_hash=context_hash,
                 cache_hash=array_hash(cached.cpu().numpy()),adapter='actual_cached_decoder_goal + scale*Pool(RSSM posterior-prior); all other sampler conditions unchanged',
