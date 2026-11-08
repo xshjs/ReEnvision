@@ -34,9 +34,9 @@ def dispatch(args):
     root=Path(os.environ['REENVISION_STRICT_RUN'])
     rows=[json.loads(s) for s in (root/'pairs.jsonl').read_text().splitlines()] if (root/'pairs.jsonl').exists() else []
     (root/'collection_summary.json').write_text(json.dumps(dict(attempted=len(rows),accepted=sum(r['accepted'] for r in rows),
-        simulated=True,training_started=False,protocol_version=3,
-        return_scope='full_current_subtask_episode' if os.environ['STRICT_CONTINUATION_STEPS']=='-1' else 'explicit_truncated_ablation',
-        both_failed=sum(not r.get('prior_success',False) and not r.get('post_success',False) for r in rows),
+        simulated=True,training_started=False,protocol_version=4,
+        return_scope='full_remaining_task_chain' if os.environ['STRICT_CONTINUATION_STEPS']=='-1' else 'explicit_truncated_chain_ablation',
+        both_zero_completed=sum(r.get('completed_tasks_prior',0)==0 and r.get('completed_tasks_post',0)==0 for r in rows),
         evaluator_sha256=hashlib.sha256(SOURCE.read_bytes()).hexdigest()),indent=2))
     if not rows:raise SystemExit('No strict pairs collected; inspect evaluator log, do not train')
 
@@ -52,6 +52,7 @@ def collect(args):
     env=os.environ.copy();env.update(REENVISION_STRICT_RUN=str(args.output.resolve()),
         STRICT_MAX_PAIRS=str(args.max_pairs),STRICT_EVERY=str(args.every),STRICT_MIN_GAP=str(args.min_gap),
         STRICT_CONTINUATION_STEPS=str(args.continuation_steps),STRICT_CONTINUATION_SEED=str(args.continuation_seed),
+        STRICT_RETURN_GAMMA=str(args.return_gamma),
         STRICT_PYTHON=sys.executable,
         PYTHON_BIN=str(HERE/'dispatch.sh'),ACTION_MODEL_FOLDER=str(train.resolve()),CHECKPOINT_PATH=str(ckpt),
         NUM_SEQUENCES=str(args.sequences),EP_LEN=str(args.episode_steps),COLLECT_SENSITIVITY_TEACHER='1',
@@ -84,13 +85,15 @@ def main():
     p.add_argument('--checkpoint',type=Path,default=default_checkpoint(DEFI))
     p.add_argument('--sequences',type=int,default=20);p.add_argument('--every',type=int,default=20)
     p.add_argument('--min-gap',type=float,default=.01)
-    p.add_argument('--episode-steps',type=int,default=360,help='Common current-subtask episode deadline, including actions before the branch')
+    p.add_argument('--episode-steps',type=int,default=360,help='Per-task budget; current task uses only its unspent portion, future tasks each get this full budget')
+    p.add_argument('--return-gamma',type=float,default=1.,help='Default 1: number of completed remaining tasks. Optionally discount by physical control steps.')
     p.add_argument('--continuation-steps',type=int,default=-1,
-                   help='Default -1: continue until success or original episode deadline. Nonnegative values are explicit truncated ablations.')
+                   help='Default -1: execute ALL remaining tasks until chain complete or first task timeout. Nonnegative values explicitly truncate the remaining chain.')
     p.add_argument('--continuation-seed',type=int,default=1701)
     a=p.parse_args()
     if a.max_pairs<=0 or a.every<=0 or a.sequences<=0 or a.min_gap<=0:p.error('positive limits required')
     if a.episode_steps<1 or a.continuation_steps < -1 or not 0<=a.continuation_seed<2**32-10000:p.error('Invalid continuation budget/seed')
+    if not 0<a.return_gamma<=1:p.error('return-gamma must be in (0,1]')
     collect(a)
 
 if __name__=='__main__':main()

@@ -29,6 +29,45 @@ def continuation_budget(episode_steps,executed_steps,suffix_steps,requested=-1):
     return remaining if requested==-1 else min(requested,remaining)
 
 
+def discounted_return(rewards,gamma=1.):
+    if not 0<gamma<=1:raise ValueError('Invalid discount')
+    r=np.asarray(rewards,dtype=float)
+    if not np.isfinite(r).all():raise ValueError('Nonfinite reward')
+    return float(np.sum(r*gamma**np.arange(len(r))))
+
+
+def rollout_remaining_chain(suffix,task_count,first_budget,task_budget,step,begin_task,next_action,success,
+                            gamma=1.,max_steps=None):
+    """CALVIN chain semantics: advance without resetting env; stop on first timeout.
+
+    Reward 1 once per completed instruction, not once for the whole trajectory.
+    Default gamma=1 measures number of completed remaining tasks. The first task
+    gets only its unspent budget; future tasks each get the original task budget.
+    """
+    if task_count<1 or first_budget<len(suffix) or task_budget<1:raise ValueError('Invalid chain budget')
+    budget=first_budget+(task_count-1)*task_budget
+    if max_steps is not None:budget=min(budget,max_steps)
+    rewards=[];events=[];active=[];actions=[];suffix_used=0;reason='all_tasks_completed'
+    for task in range(task_count):
+        begin_task(task);completed=False
+        for local in range(first_budget if task==0 else task_budget):
+            if len(rewards)>=budget:
+                reason='explicit_truncation';break
+            if task==0 and local<len(suffix):
+                action=suffix[local].copy();suffix_used+=1
+            else:action=np.asarray(next_action(task,local)).copy()
+            info=step(action);hit=bool(success(task,info))
+            actions.append(action);rewards.append(float(hit));active.append(task)
+            if hit:
+                events.append({'task_index':task,'step':len(rewards)-1});completed=True;break
+        if not completed:
+            if reason!='explicit_truncation':reason='task_timeout'
+            break
+    return dict(return_value=discounted_return(rewards,gamma),rewards=rewards,events=events,
+        active_tasks=active,actions=actions,suffix_executed=suffix_used,termination=reason,
+        completed_tasks=len(events),all_tasks_completed=len(events)==task_count,budget=budget)
+
+
 def accept_pair(before,after,min_gap=.01):
     a=np.asarray(before,float);b=np.asarray(after,float)
     if a.shape!=b.shape or a.size<2 or not np.isfinite(a).all() or not np.isfinite(b).all():
