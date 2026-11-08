@@ -140,6 +140,12 @@ def install(ns):
             # All attempted pairs retained, including ties and regressions.
             file=root/f'pair_{count:06d}.npz'
             capture_arrays={}
+            # Preserve exactly the existing inference inputs for drop-in TCN training.
+            if live.get('base_summary_exec') is not None:
+                capture_arrays['legacy_runtime_belief_before']=np.asarray(live['base_summary_exec'],np.float32).reshape(-1)
+                capture_arrays['legacy_runtime_belief_after']=h1.cpu().numpy().reshape(-1)
+                innovation=payload.get('innovation')
+                if torch.is_tensor(innovation):capture_arrays['legacy_runtime_innovation']=innovation.detach().float().cpu().numpy().reshape(-1)
             for name in ['sigmas','latent_motion_tokens_up','latent_plan','goal']:
                 value=sampler_inputs.get(name)
                 if torch.is_tensor(value):capture_arrays['cache_input_'+name]=value.detach().cpu().numpy()

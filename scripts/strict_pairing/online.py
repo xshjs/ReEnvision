@@ -66,6 +66,7 @@ def dispatch(args):
 
 
 def main():
+    raise SystemExit('Outcome online gate disabled by request. Use the original inference launcher and directional_sensitivity_tcn.pt from train_outcome.py; no four-class online decisions.')
     if len(sys.argv)>1 and sys.argv[1]=='dispatch':return dispatch(sys.argv[2:])
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--outcome-checkpoint',type=Path,required=True)
