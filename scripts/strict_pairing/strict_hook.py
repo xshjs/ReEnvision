@@ -8,14 +8,16 @@ import random
 from pathlib import Path
 import numpy as np
 import torch
-import torch.nn.functional as F
-from strict_core import BulletSnapshot,RNG,PolicyRuntime,array_hash,accept_pair,rollout_remaining_chain
+from strict_core import BulletSnapshot,RNG,PolicyRuntime,array_hash,accept_binary_repair,rollout_remaining_chain
+from cache_anchor import install_capture,anchored_pair,CacheMismatch
 
 
 class CollectionComplete(BaseException):pass
 
 
 def install(ns):
+    from policy_models.VPP_policy import VPP_Policy
+    install_capture(VPP_Policy)
     root=Path(os.environ['REENVISION_STRICT_RUN']);root.mkdir(parents=True,exist_ok=True)
     rows=root/'pairs.jsonl';count=0;seen=0
     max_pairs=int(os.environ.get('STRICT_MAX_PAIRS','200'))
@@ -49,45 +51,30 @@ def install(ns):
         ref=copy.deepcopy(live['start_info'])
         done=lambda info:bool(oracle.get_task_info_for_set(ref,info,{task}))
         if done(env.get_info()):return None
-        ctx=getattr(model,'_last_suffix_transport_context',None)
-        noise=getattr(model,'_last_denoise_initial_x',None)
-        if ctx is None or noise is None:return None
         h0=payload['h_prior'].detach().float().reshape(1,-1)
         h1=payload['h_posterior'].detach().float().reshape(1,-1)
         if h0.shape!=h1.shape or h0.shape[1]%2:raise SystemExit('Invalid joint belief')
         if not torch.isfinite(h0).all() or not torch.isfinite(h1).all():return None
-        half=h0.shape[1]//2
-        # Explicit fixed adapter: pooled RSSM future/action halves to decoder conditions.
-        # This mapping, not return labels, is the intervention being evaluated.
-        shape=ctx['latent_goal_base'].shape;adim=int(model.action_intent_dim)
-        def condition(h):
-            f=F.adaptive_avg_pool1d(h[:,:half].unsqueeze(1),int(np.prod(shape))).reshape(shape)
-            a=F.adaptive_avg_pool1d(h[:,half:].unsqueeze(1),adim).reshape(1,16,7)
-            return model._make_action_intent_conditions(f,a)
-        c0=condition(h0);c1=condition(h1)
-        original_noise=noise.detach().clone();cached=model.pred_action_seq.detach().clone()
+        if model.pred_action_seq is None:return None
+        cached=model.pred_action_seq.detach().clone()
         start=int(model.rollout_step_counter)
         if start<1 or start>=cached.shape[1]:return None
-        rng=RNG();values=[]
-        context_hash=hashlib.sha256(''.join(array_hash(v.detach().cpu().numpy())
-            for k,v in sorted(ctx['perceptual_emb'].items()) if torch.is_tensor(v)).encode()).hexdigest()
+        belief_scale=float(os.environ.get('STRICT_BELIEF_UPDATE_SCALE','1'))
+        max_delta=float(os.environ.get('STRICT_MAX_ACTION_DELTA','.015'))
         try:
-            with torch.inference_mode():
-                for c in [c0,c1,c0]:
-                    rng.restore()
-                    values.append(model.denoise_actions(torch.zeros_like(c[0]),
-                        {k:v.clone() if torch.is_tensor(v) else v for k,v in ctx['perceptual_emb'].items()},
-                        c[0].clone(),ctx.get('latent_motion_tokens_up').clone() if torch.is_tensor(ctx.get('latent_motion_tokens_up')) else None,
-                        action_intent_cond=c[1],inference=True,initial_x=original_noise.clone()).detach())
-        finally:
-            model._last_denoise_initial_x=original_noise;rng.restore()
-        if not torch.allclose(values[0],values[2],atol=1e-7,rtol=0):
-            raise SystemExit('Matched noise/conditioning does not reproduce action output')
-        if not torch.equal(cached,model.pred_action_seq):raise SystemExit('Decoder modified action cache')
-        a0=values[0][0,start:].cpu().numpy().copy();a1=values[1][0,start:].cpu().numpy().copy()
+            pair=anchored_pair(model,h1-h0,start,belief_scale,max_delta)
+        except CacheMismatch as e:
+            print(f'[strict] rejected cache provenance: {e}',flush=True);return None
+        sampler_inputs=pair['inputs'];original_noise=sampler_inputs['x_t'].detach().clone()
+        ctx=sampler_inputs['state']
+        tensors=sorted(ctx.items()) if isinstance(ctx,dict) else [('state',ctx)]
+        context_hash=hashlib.sha256(''.join(array_hash(v.detach().cpu().numpy())
+            for k,v in tensors if torch.is_tensor(v)).encode()).hexdigest()
+        a0=pair['baseline'].cpu().numpy().copy();a1=pair['candidate'].cpu().numpy().copy()
         if not (np.isfinite(a0).all() and np.isfinite(a1).all()):return None
         if a0.shape!=a1.shape or len(a0)==0:return None
         requested_tail=int(os.environ.get('STRICT_CONTINUATION_STEPS','-1'))
+        if requested_tail!=-1:raise SystemExit('Binary full-chain collection forbids truncated return horizons')
         executed_steps=int(kw['step'])+1
         if int(cfg.ep_len)-executed_steps < len(a0):
             print('[strict] skip: complete candidate suffix exceeds episode deadline',flush=True)
@@ -96,7 +83,7 @@ def install(ns):
         chain_budget=first_budget+(len(remaining_tasks)-1)*int(cfg.ep_len)
         tail_steps=chain_budget-len(a0) if requested_tail==-1 else min(requested_tail,chain_budget-len(a0))
         gamma=float(os.environ.get('STRICT_RETURN_GAMMA','1'))
-        # No action clipping: the target must match the actions actually measured.
+        if gamma!=1.:raise SystemExit('Binary success pairs cannot be ranked by speed/discount')
         snapshot=BulletSnapshot(raw)
         try:
             def step(a):return env.step(torch.as_tensor(a,device=model.device))[3]
@@ -146,28 +133,48 @@ def install(ns):
                 finally:snapshot.restore()
             ret0=[r['return_value'] for r in rec[0]];ret1=[r['return_value'] for r in rec[1]]
             valid_suffix_steps=min(rec[0][0]['suffix_executed'],rec[1][0]['suffix_executed'])
-            accepted=accept_pair(ret0,ret1,float(os.environ.get('STRICT_MIN_GAP','.01')))
+            accepted=accept_binary_repair(ret0,ret1)
             identity=(int(kw['sequence_index']),int(kw['subtask_index']),int(kw['step']))
             # All attempted pairs retained, including ties and regressions.
             file=root/f'pair_{count:06d}.npz'
+            capture_arrays={}
+            for name in ['sigmas','latent_motion_tokens_up','latent_plan','goal']:
+                value=sampler_inputs.get(name)
+                if torch.is_tensor(value):capture_arrays['cache_input_'+name]=value.detach().cpu().numpy()
+            for key,value in tensors:
+                if torch.is_tensor(value):capture_arrays['cache_observation_'+str(key)]=value.detach().cpu().numpy()
+            for key,value in sampler_inputs.get('extra_args',{}).items():
+                if torch.is_tensor(value):capture_arrays['cache_extra_'+str(key)]=value.detach().cpu().numpy()
+            generation=model._strict_live_cache_generation
+            capture_arrays['sampler_rng_cpu']=generation['rng'].cpu.cpu().numpy()
+            for device,value in enumerate(generation['rng'].cuda or []):capture_arrays['sampler_rng_cuda_'+str(device)]=value.cpu().numpy()
             np.savez_compressed(file,state=np.asarray(kw['state_after'],np.float32),
-                prior=h0.cpu().numpy()[0],posterior=h1.cpu().numpy()[0],
+                prior=pair['cache_goal'].cpu().numpy(),posterior=pair['candidate_goal'].cpu().numpy(),
+                rssm_prior=h0.cpu().numpy()[0],rssm_posterior=h1.cpu().numpy()[0],
                 action_prior=a0,action_post=a1,cached_suffix=cached[0,start:].cpu().numpy(),
+                measured_correction=a1-a0,raw_candidate=pair['raw_candidate'].cpu().numpy(),
                 returns_prior=np.asarray(ret0),returns_post=np.asarray(ret1),
                 rewards_prior=np.asarray(rec[0][0]['rewards']),rewards_post=np.asarray(rec[1][0]['rewards']),
+                task_completion_rewards_prior=np.asarray(rec[0][0]['task_completion_rewards']),
+                task_completion_rewards_post=np.asarray(rec[1][0]['task_completion_rewards']),
                 active_tasks_prior=np.asarray(rec[0][0]['active_tasks']),active_tasks_post=np.asarray(rec[1][0]['active_tasks']),
                 rollout_actions_prior=np.asarray(rec[0][0]['actions'],np.float32).reshape(-1,7),
                 rollout_actions_post=np.asarray(rec[1][0]['actions'],np.float32).reshape(-1,7),
                 endpoint_prior=rec[0][0]['endpoint'],endpoint_post=rec[1][0]['endpoint'],physics_start=snapshot.start,
-                noise=original_noise.cpu().numpy())
+                noise=original_noise.cpu().numpy(),**capture_arrays)
             info=dict(pair=count,sequence=identity[0],subtask=identity[1],step=identity[2],task=task,
                 file=file.name,accepted=accepted,returns_prior=ret0,returns_post=ret1,
                 snapshot_hash=array_hash(snapshot.start),noise_hash=array_hash(original_noise.cpu().numpy()),
                 observation_condition_hash=context_hash,
-                cache_hash=array_hash(cached.cpu().numpy()),adapter='RSSM halves pooled to future512 and action16x7',
+                cache_hash=array_hash(cached.cpu().numpy()),adapter='actual_cached_decoder_goal + scale*Pool(RSSM posterior-prior); all other sampler conditions unchanged',
+                baseline_original_cache=True,cache_reconstruction_verified=True,
+                branch_labels={'prior':'original_cached_suffix','post':'final_measured_cache_anchored_candidate'},
+                sampler_type=str(sampler_inputs['sampler_type']),
+                cache_reconstruction_max_error=pair['reconstruction_error'],cache_reconstruction_atol=1e-6,
+                belief_update_scale=belief_scale,max_action_delta=max_delta,candidate_processed_before_rollout=True,
                 observation='cached policy observation; identical for both branches, not reencoded current image',
-                protocol_version=4,remaining_tasks=remaining_tasks,return_gamma=gamma,
-                return_definition='sum gamma^t r_t across ALL remaining ordered tasks; r_t=1 on each first task completion; terminate on all-complete or first task timeout; no partial-progress reward',
+                protocol_version=5,remaining_tasks=remaining_tasks,return_gamma=1.,return_type='binary_full_remaining_chain_success',
+                return_definition='1 iff ALL remaining ordered tasks complete; otherwise 0. Completion count and speed never rank pairs. Both success and both failure are ties.',
                 return_scope='full_remaining_task_chain' if requested_tail==-1 else 'explicit_truncated_chain_ablation',
                 episode_deadline_steps=int(cfg.ep_len),executed_steps_before_pair=executed_steps,
                 full_remaining_chain_return=requested_tail==-1,
@@ -175,7 +182,7 @@ def install(ns):
                 continuation_steps=tail_steps,continuation_requested_steps=requested_tail,
                 continuation_seed=tail_seed,min_return_gap=float(os.environ.get('STRICT_MIN_GAP','.01')),
                 replay='ABBA identical-state identical-RNG determinism check; NOT independent trials',
-                cache_alignment='both decoded chunks use same cached cut; expected branch is rebased, not assumed equal to original cache',
+                cache_alignment='baseline is ORIGINAL cached suffix, verified against its actual generation inputs/noise/weights; target is final measured candidate minus original cache',
                 suffix_start=start,horizon=len(a0),return_horizon=len(a0)+tail_steps,
                 valid_suffix_steps=valid_suffix_steps,
                 completed_tasks_prior=rec[0][0]['completed_tasks'],completed_tasks_post=rec[1][0]['completed_tasks'],
@@ -184,7 +191,7 @@ def install(ns):
                 termination_prior=rec[0][0]['termination'],termination_post=rec[1][0]['termination'])
             with rows.open('a') as f:f.write(json.dumps(info)+'\n');f.flush()
             count+=1
-            print(f'[strict] pair={count}/{max_pairs} R_prior={ret0[0]:.4f} R_post={ret1[0]:.4f} accepted={accepted} full_chain={requested_tail==-1} remaining_tasks={len(remaining_tasks)}',flush=True)
+            print(f'[strict] pair={count}/{max_pairs} G_cache={ret0[0]:.0f} G_candidate={ret1[0]:.0f} accepted={accepted} full_chain=True remaining_tasks={len(remaining_tasks)}',flush=True)
         except Exception as e:
             (root/'fatal.json').write_text(json.dumps({'error':repr(e),'pair':count},indent=2))
             raise SystemExit(f'Strict collection aborted: {e}') from e

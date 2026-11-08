@@ -34,8 +34,11 @@ def dispatch(args):
     root=Path(os.environ['REENVISION_STRICT_RUN'])
     rows=[json.loads(s) for s in (root/'pairs.jsonl').read_text().splitlines()] if (root/'pairs.jsonl').exists() else []
     (root/'collection_summary.json').write_text(json.dumps(dict(attempted=len(rows),accepted=sum(r['accepted'] for r in rows),
-        simulated=True,training_started=False,protocol_version=4,
-        return_scope='full_remaining_task_chain' if os.environ['STRICT_CONTINUATION_STEPS']=='-1' else 'explicit_truncated_chain_ablation',
+        simulated=True,training_started=False,protocol_version=5,
+        baseline='original_live_cache_with_verified_generation_provenance',return_type='binary_full_remaining_chain_success',
+        return_scope='full_remaining_task_chain',
+        both_success=sum(r.get('all_remaining_succeeded_prior',False) and r.get('all_remaining_succeeded_post',False) for r in rows),
+        both_failure=sum(not r.get('all_remaining_succeeded_prior',False) and not r.get('all_remaining_succeeded_post',False) for r in rows),
         both_zero_completed=sum(r.get('completed_tasks_prior',0)==0 and r.get('completed_tasks_post',0)==0 for r in rows),
         evaluator_sha256=hashlib.sha256(SOURCE.read_bytes()).hexdigest()),indent=2))
     if not rows:raise SystemExit('No strict pairs collected; inspect evaluator log, do not train')
@@ -53,6 +56,7 @@ def collect(args):
         STRICT_MAX_PAIRS=str(args.max_pairs),STRICT_EVERY=str(args.every),STRICT_MIN_GAP=str(args.min_gap),
         STRICT_CONTINUATION_STEPS=str(args.continuation_steps),STRICT_CONTINUATION_SEED=str(args.continuation_seed),
         STRICT_RETURN_GAMMA=str(args.return_gamma),
+        STRICT_BELIEF_UPDATE_SCALE=str(args.belief_update_scale),STRICT_MAX_ACTION_DELTA=str(args.max_action_delta),
         STRICT_PYTHON=sys.executable,
         PYTHON_BIN=str(HERE/'dispatch.sh'),ACTION_MODEL_FOLDER=str(train.resolve()),CHECKPOINT_PATH=str(ckpt),
         NUM_SEQUENCES=str(args.sequences),EP_LEN=str(args.episode_steps),COLLECT_SENSITIVITY_TEACHER='1',
@@ -61,6 +65,7 @@ def collect(args):
         DISABLE_RETRY_AFTER_FIRST_PASS='1',DYNAMIC_COUPLING_DELTA_ACTION_REPAIR_MIX='0',
         JOINT_BELIEF_CLEAN_H_UPDATE_SCALE='0.8',LINEAR_SUFFIX_SENSITIVITY='0',
         DIRECTIONAL_SENSITIVITY_TCN='0',WANDB_MODE='disabled',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',
+        DEFI_SUFFIX_SENSITIVITY_CACHE='0',DIRECT_ACTION_CORRECTION_TCN='0',SUFFIX_MASK_ABLATION_MODE='off',
         XDG_CACHE_HOME='/tmp/reenvision-strict-cache',MPLCONFIGDIR='/tmp/reenvision-strict-mpl')
     manifest=dict(checkpoint=str(ckpt),checkpoint_sha256=hashlib.sha256(ckpt.read_bytes()).hexdigest(),
         evaluator=str(SOURCE),evaluator_sha256=hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
@@ -84,16 +89,19 @@ def main():
     p.add_argument('--output',type=Path,required=True);p.add_argument('--max-pairs',type=int,default=200)
     p.add_argument('--checkpoint',type=Path,default=default_checkpoint(DEFI))
     p.add_argument('--sequences',type=int,default=20);p.add_argument('--every',type=int,default=20)
-    p.add_argument('--min-gap',type=float,default=.01)
+    p.add_argument('--min-gap',type=float,default=1.,choices=[1.],help='Binary success filter: original failure 0, candidate success 1')
+    p.add_argument('--belief-update-scale',type=float,default=1.)
+    p.add_argument('--max-action-delta',type=float,default=.015,help='Clip candidate correction BEFORE rollout; 0 disables clipping')
     p.add_argument('--episode-steps',type=int,default=360,help='Per-task budget; current task uses only its unspent portion, future tasks each get this full budget')
-    p.add_argument('--return-gamma',type=float,default=1.,help='Default 1: number of completed remaining tasks. Optionally discount by physical control steps.')
-    p.add_argument('--continuation-steps',type=int,default=-1,
-                   help='Default -1: execute ALL remaining tasks until chain complete or first task timeout. Nonnegative values explicitly truncate the remaining chain.')
+    p.add_argument('--return-gamma',type=float,default=1.,choices=[1.],help='Binary full-chain success; no speed discount')
+    p.add_argument('--continuation-steps',type=int,default=-1,choices=[-1],
+                   help='Execute ALL remaining tasks until chain complete or first task timeout; no truncated-return mode')
     p.add_argument('--continuation-seed',type=int,default=1701)
     a=p.parse_args()
     if a.max_pairs<=0 or a.every<=0 or a.sequences<=0 or a.min_gap<=0:p.error('positive limits required')
     if a.episode_steps<1 or a.continuation_steps < -1 or not 0<=a.continuation_seed<2**32-10000:p.error('Invalid continuation budget/seed')
-    if not 0<a.return_gamma<=1:p.error('return-gamma must be in (0,1]')
+    if not (0<=a.belief_update_scale<float('inf') and 0<=a.max_action_delta<float('inf')):
+        p.error('Belief scale and action clipping must be finite/nonnegative')
     collect(a)
 
 if __name__=='__main__':main()

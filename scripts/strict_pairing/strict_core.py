@@ -40,11 +40,11 @@ def rollout_remaining_chain(suffix,task_count,first_budget,task_budget,step,begi
                             gamma=1.,max_steps=None):
     """CALVIN chain semantics: advance without resetting env; stop on first timeout.
 
-    Reward 1 once per completed instruction, not once for the whole trajectory.
-    Default gamma=1 measures number of completed remaining tasks. The first task
+    Return is 1 iff ALL remaining tasks complete, otherwise 0. Completion counts
+    are diagnostics only, never a preference signal. The first task
     gets only its unspent budget; future tasks each get the original task budget.
     """
-    if task_count<1 or first_budget<len(suffix) or task_budget<1:raise ValueError('Invalid chain budget')
+    if task_count<1 or first_budget<len(suffix) or task_budget<1 or gamma!=1.:raise ValueError('Invalid binary chain budget/discount')
     budget=first_budget+(task_count-1)*task_budget
     if max_steps is not None:budget=min(budget,max_steps)
     rewards=[];events=[];active=[];actions=[];suffix_used=0;reason='all_tasks_completed'
@@ -63,7 +63,10 @@ def rollout_remaining_chain(suffix,task_count,first_budget,task_budget,step,begi
         if not completed:
             if reason!='explicit_truncation':reason='task_timeout'
             break
-    return dict(return_value=discounted_return(rewards,gamma),rewards=rewards,events=events,
+    complete=len(events)==task_count
+    binary_rewards=[0.]*len(rewards)
+    if complete and binary_rewards:binary_rewards[-1]=1.
+    return dict(return_value=float(complete),rewards=binary_rewards,task_completion_rewards=rewards,events=events,
         active_tasks=active,actions=actions,suffix_executed=suffix_used,termination=reason,
         completed_tasks=len(events),all_tasks_completed=len(events)==task_count,budget=budget)
 
@@ -73,6 +76,11 @@ def accept_pair(before,after,min_gap=.01):
     if a.shape!=b.shape or a.size<2 or not np.isfinite(a).all() or not np.isfinite(b).all():
         return False
     return bool(np.all(b>=a) and (b-a).mean()>=min_gap)
+
+
+def accept_binary_repair(before,after):
+    a=np.asarray(before,float);b=np.asarray(after,float)
+    return bool(a.ndim==b.ndim==1 and a.size>=2 and a.shape==b.shape and np.all(a==0.) and np.all(b==1.))
 
 
 class RNG:
