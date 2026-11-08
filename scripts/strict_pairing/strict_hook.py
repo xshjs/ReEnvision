@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from strict_core import BulletSnapshot,RNG,PolicyRuntime,array_hash,accept_pair,replay_pair
+from strict_core import BulletSnapshot,RNG,PolicyRuntime,array_hash,accept_pair,replay_pair,continuation_budget
 
 
 class CollectionComplete(BaseException):pass
@@ -79,13 +79,16 @@ def install(ns):
         a0=values[0][0,start:].cpu().numpy().copy();a1=values[1][0,start:].cpu().numpy().copy()
         if not (np.isfinite(a0).all() and np.isfinite(a1).all()):return None
         if a0.shape!=a1.shape or len(a0)==0:return None
+        requested_tail=int(os.environ.get('STRICT_CONTINUATION_STEPS','-1'))
+        executed_steps=int(kw['step'])+1
+        if int(cfg.ep_len)-executed_steps < len(a0):
+            print('[strict] skip: complete candidate suffix exceeds episode deadline',flush=True)
+            return None
+        tail_steps=continuation_budget(int(cfg.ep_len),executed_steps,len(a0),requested_tail)
         # No action clipping: the target must match the actions actually measured.
         snapshot=BulletSnapshot(raw)
         try:
             def step(a):return env.step(torch.as_tensor(a,device=model.device))[3]
-            requested_tail=int(os.environ.get('STRICT_CONTINUATION_STEPS','120'))
-            remaining=max(0,int(cfg.ep_len)-int(kw['step'])-1-len(a0))
-            tail_steps=min(requested_tail,remaining)
             runtime=PolicyRuntime(model);tail_logs=[]
             tail_seed=int(os.environ.get('STRICT_CONTINUATION_SEED','1701'))
             def reset_branch(side):
@@ -115,6 +118,7 @@ def install(ns):
                 if np.asarray(tail_logs[i]).shape!=np.asarray(tail_logs[j]).shape or not np.allclose(tail_logs[i],tail_logs[j],atol=1e-7,rtol=0):
                     raise ValueError('Identical-branch continuation action replay mismatch')
             ret0=[r[0] for r in rec[0]];ret1=[r[0] for r in rec[1]]
+            valid_suffix_steps=min(len(a0),len(rec[0][0][2]),len(rec[1][0][2]))
             accepted=accept_pair(ret0,ret1,float(os.environ.get('STRICT_MIN_GAP','.01')))
             identity=(int(kw['sequence_index']),int(kw['subtask_index']),int(kw['step']))
             # All attempted pairs retained, including ties and regressions.
@@ -134,18 +138,22 @@ def install(ns):
                 observation_condition_hash=context_hash,
                 cache_hash=array_hash(cached.cpu().numpy()),adapter='RSSM halves pooled to future512 and action16x7',
                 observation='cached policy observation; identical for both branches, not reencoded current image',
-                protocol_version=2,
-                return_definition='gamma=.99 first oracle subtask success within suffix + capped frozen base-policy continuation; no partial-progress reward',
+                protocol_version=3,
+                return_definition='sum gamma^t r_t until current subtask success or episode deadline; r_t=1 only at first oracle success, otherwise 0; gamma=.99; no partial-progress reward',
+                return_scope='full_current_subtask_episode' if requested_tail==-1 else 'explicit_truncated_ablation',
+                episode_deadline_steps=int(cfg.ep_len),executed_steps_before_pair=executed_steps,
+                full_episode_return=requested_tail==-1,
                 continuation_rule='reset at suffix boundary, frozen model.step on branch obs, GFDM mode, no belief controller or overrides',
                 continuation_steps=tail_steps,continuation_requested_steps=requested_tail,
                 continuation_seed=tail_seed,min_return_gap=float(os.environ.get('STRICT_MIN_GAP','.01')),
                 replay='ABBA identical-state identical-RNG determinism check; NOT independent trials',
                 cache_alignment='both decoded chunks use same cached cut; expected branch is rebased, not assumed equal to original cache',
                 suffix_start=start,horizon=len(a0),return_horizon=len(a0)+tail_steps,
+                valid_suffix_steps=valid_suffix_steps,
                 prior_success=any(rec[0][0][2]),post_success=any(rec[1][0][2]))
             with rows.open('a') as f:f.write(json.dumps(info)+'\n');f.flush()
             count+=1
-            print(f'[strict] pair={count}/{max_pairs} R_prior={ret0[0]:.4f} R_post={ret1[0]:.4f} accepted={accepted}',flush=True)
+            print(f'[strict] pair={count}/{max_pairs} R_prior={ret0[0]:.4f} R_post={ret1[0]:.4f} accepted={accepted} full_episode={requested_tail==-1} return_horizon={len(a0)+tail_steps}',flush=True)
         except Exception as e:
             (root/'fatal.json').write_text(json.dumps({'error':repr(e),'pair':count},indent=2))
             raise SystemExit(f'Strict collection aborted: {e}') from e

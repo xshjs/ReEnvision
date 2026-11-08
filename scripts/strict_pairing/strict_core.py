@@ -17,6 +17,18 @@ def first_success_return(hits, gamma=.99):
     return next((float(gamma**i) for i,h in enumerate(hits) if h),0.)
 
 
+def continuation_budget(episode_steps,executed_steps,suffix_steps,requested=-1):
+    """-1 evaluates through the episode deadline; >=0 is an explicit ablation.
+
+    Both candidate suffixes must fit the same remaining episode budget.
+    """
+    if episode_steps<=0 or executed_steps<0 or suffix_steps<1 or requested < -1:
+        raise ValueError('Invalid rollout budget')
+    remaining=episode_steps-executed_steps-suffix_steps
+    if remaining<0:raise ValueError('Candidate suffix exceeds the episode deadline')
+    return remaining if requested==-1 else min(requested,remaining)
+
+
 def accept_pair(before,after,min_gap=.01):
     a=np.asarray(before,float);b=np.asarray(after,float)
     if a.shape!=b.shape or a.size<2 or not np.isfinite(a).all() or not np.isfinite(b).all():
@@ -133,6 +145,7 @@ def replay_pair(snapshot,actions,step,success,gamma=.99,continuation=None,reset=
             if reset is not None:reset(side)
             for a in actions[side]:
                 info=step(a.copy());hits.append(bool(success(info)))
+                if hits[-1]:break
             if continuation is not None and not any(hits):
                 for info in continuation():
                     hit=bool(success(info));hits.append(hit)

@@ -16,7 +16,7 @@ HERE=Path(__file__).resolve().parent
 from paths import defi_root
 sys.path.insert(0,str(defi_root()/'Step3_DeFI'))
 from policy_evaluation.train_directional_sensitivity_tcn import DirectionalSensitivityTCN
-from strict_core import accept_pair
+from strict_core import accept_pair,first_success_return
 
 
 def task_vector(task):
@@ -40,6 +40,13 @@ def load(run,min_pairs,min_sequences):
             if not np.array_equal(z['returns_prior'],r['returns_prior']) or not np.array_equal(z['returns_post'],r['returns_post']):
                 raise ValueError('Manifest/NPZ return mismatch')
             if not accept_pair(z['returns_prior'],z['returns_post'],gap):raise ValueError('Invalid measured return pair')
+            for side in ['prior','post']:
+                hits=z['hits_'+side]
+                if len(hits)>r.get('return_horizon',r['horizon']):raise ValueError('Return trace exceeds evaluation budget')
+                if not np.allclose(z['returns_'+side],first_success_return(hits),atol=1e-9,rtol=0):
+                    raise ValueError('Recorded return differs from actual success-event trace')
+            if r.get('full_episode_return',False) and r['return_horizon']!=r['episode_deadline_steps']-r['executed_steps_before_pair']:
+                raise ValueError('Full-episode flag conflicts with actual rollout budget')
             a=z['action_prior'];b=z['action_post'];n=len(a)
             if n!=r['horizon'] or n>10 or a.shape!=b.shape or a.shape[1]!=7:raise ValueError('Action alignment mismatch')
             def pad(x):return np.pad(x,((0,10-n),(0,0))).astype(np.float32)
@@ -48,7 +55,9 @@ def load(run,min_pairs,min_sequences):
             out['action'].append(pad(a));out['target'].append(pad(b-a))
             out['task'].append(task_vector(r['task']))
             out['meta'].append([r['suffix_start']/10,n/10,1])
-            out['mask'].append(np.arange(10)<n);out['sequence'].append(r['sequence'])
+            valid=r.get('valid_suffix_steps',n)
+            if not 1<=valid<=n:raise ValueError('Invalid measured suffix mask')
+            out['mask'].append(np.arange(10)<valid);out['sequence'].append(r['sequence'])
     return {k:np.asarray(v) for k,v in out.items()},rows
 
 
@@ -57,12 +66,15 @@ def main():
     p.add_argument('--run',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--steps',type=int,default=3000);p.add_argument('--device',default='cuda:0')
     p.add_argument('--min-pairs',type=int,default=64);p.add_argument('--min-sequences',type=int,default=10)
+    p.add_argument('--allow-truncated-return',action='store_true',help='Explicit historical/truncated-return ablation only')
     a=p.parse_args()
     if a.output.exists():raise FileExistsError(a.output)
     if a.min_sequences<6 or a.min_pairs<12 or a.steps<1:p.error('At least 6 sequences, 12 pairs, positive steps required')
     if a.device.startswith('cuda') and not torch.cuda.is_available():raise SystemExit('CUDA unavailable; explicit --device cpu allowed')
     torch.set_num_threads(4);torch.manual_seed(42);rng=np.random.default_rng(42)
     d,allrows=load(a.run,a.min_pairs,a.min_sequences)
+    if not a.allow_truncated_return and any(not r.get('full_episode_return',False) for r in allrows if r['accepted']):
+        raise ValueError('Training defaults to full-episode measured returns; recollect or explicitly choose --allow-truncated-return for an ablation')
     seqs=np.unique(d['sequence']);rng.shuffle(seqs);nv=max(1,len(seqs)//5);nt=max(1,len(seqs)//5)
     groups={'test':seqs[:nt],'validation':seqs[nt:nt+nv],'train':seqs[nt+nv:]}
     ids={k:np.flatnonzero(np.isin(d['sequence'],v)) for k,v in groups.items()}
@@ -109,7 +121,8 @@ def main():
     report={'attempted_pairs':len(allrows),'accepted_pairs':len(d['sequence']),'split_sequences':{k:v.tolist() for k,v in groups.items()},
         'selected_step':best_step,'test':result,'history':history,'robot_success_evaluated':False,
         'protocol_versions':sorted({r.get('protocol_version',1) for r in allrows}),
-        'limitations':['Oracle return within suffix + configured continuation, not unlimited-horizon return; no partial-progress reward.',
+        'full_episode_return':all(r.get('full_episode_return',False) for r in allrows if r['accepted']),
+        'limitations':['Return ends at current-subtask success or common episode deadline, not the entire multi-subtask chain; no partial-progress reward.',
             'Positive-return selection does not prove necessity of each action edit.',
             'Fixed pooled belief-to-decoder adapter and cached observation.',
             'Short suffixes padded; padded positions excluded from all losses/metrics.',
