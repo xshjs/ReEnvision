@@ -8,6 +8,10 @@ class SelectiveRepair:
         self.device=device
         # Only load locally trusted checkpoints: torch pickle can execute code.
         self.ckpt=torch.load(checkpoint,map_location=device,weights_only=False)
+        if not isinstance(self.ckpt,dict) or not {'state_dict','config','normalization','labels'}.issubset(self.ckpt):
+            raise ValueError('Not a four-outcome TCN checkpoint; legacy base/belief/TCN weights cannot replace trained outcome heads')
+        if tuple(self.ckpt['labels'])!=('repair','preserve','unresolved','harmful'):
+            raise ValueError('Incompatible outcome label order')
         self.model=OutcomeTCN(self.ckpt['config']).to(device).eval()
         self.model.load_state_dict(self.ckpt['state_dict'])
 

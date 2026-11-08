@@ -32,7 +32,11 @@ def main():
     config=dict(state_dim=x['state'].shape[1],summary_dim=x['belief'].shape[1],action_dim=7,
         task_dim=x['task'].shape[1],chunk_len=10,hidden_dim=128,cond_dim=128,num_blocks=3,dropout=.05,output_scale=.02)
     model=OutcomeTCN(config).to(args.device);opt=torch.optim.AdamW(model.parameters(),lr=3e-4,weight_decay=1e-4)
-    def forward(i):return model(*(x[k][i] for k in ['state','belief','action','delta_belief','task','meta','mask']))
+    def forward(i):
+        # Classification must not see how many suffix steps actually ran before
+        # future termination. Use only the cache length known at decision time.
+        input_mask=(torch.arange(10,device=args.device).unsqueeze(0)<torch.round(x['meta'][i,1:2]*10)).float()
+        return model(*(x[k][i] for k in ['state','belief','action','delta_belief','task','meta']),input_mask)
     def average(v,m):return (v*m).sum()/m.sum().clamp_min(1)
     def losses(h,i):
         y=x['outcome'][i];mask=x['mask'][i]
