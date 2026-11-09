@@ -11,6 +11,7 @@ import torch
 from strict_core import BulletSnapshot,RNG,PolicyRuntime,array_hash,accept_binary_repair,rollout_remaining_chain
 from cache_anchor import install_capture,anchored_pair,CacheMismatch
 from outcome import classify_outcome,LABELS
+from repair_metrics import episode_key
 
 
 class CollectionComplete(BaseException):pass
@@ -171,6 +172,8 @@ def install(ns):
                 endpoint_prior=rec[0][0]['endpoint'],endpoint_post=rec[1][0]['endpoint'],physics_start=snapshot.start,
                 noise=original_noise.cpu().numpy(),**capture_arrays)
             info=dict(pair=count,sequence=identity[0],subtask=identity[1],step=identity[2],task=task,
+                episode_key=episode_key(chain_frame.f_locals['initial_state'],sequence),
+                episode_tasks=sequence,candidate_source='belief_counterfactual',tcn_triggered=False,
                 file=file.name,accepted=accepted,outcome=outcome,training_eligible=True,returns_prior=ret0,returns_post=ret1,
                 completion_steps_prior=len(rec[0][0]['actions']),completion_steps_post=len(rec[1][0]['actions']),
                 correction_l2=float(np.linalg.norm(a1-a0)),correction_max=float(np.abs(a1-a0).max()),

@@ -64,9 +64,13 @@ def main():
     if config['action_dim']!=7 or config['chunk_len']!=10:raise ValueError('Collector supports 10x7 cache only')
     d,rows=load(a.run,a.min_pairs,a.min_sequences,all_outcomes=True)
     d=legacy_inputs(a.run,d,rows,config)
-    seq=np.unique(d['sequence']);rng.shuffle(seq);n=max(1,len(seq)//5)
+    if any(not row.get('episode_key') for row in rows):raise ValueError('Recollect data with stable episode keys before claiming held-out evaluation')
+    epkeys=np.asarray([r['episode_key'] for r in rows])
+    seq=np.unique(epkeys)
+    if len(seq)<a.min_sequences:raise ValueError('Insufficient independent original episodes (duplicate sequence IDs do not count)')
+    rng.shuffle(seq);n=max(1,len(seq)//5)
     groups={'test':seq[:n],'validation':seq[n:2*n],'train':seq[2*n:]}
-    ids={k:np.flatnonzero(np.isin(d['sequence'],v)) for k,v in groups.items()}
+    ids={k:np.flatnonzero(np.isin(epkeys,v)) for k,v in groups.items()}
     counts={k:np.bincount(d['outcome'][i],minlength=4).tolist() for k,i in ids.items()}
     if min(counts['train'])==0:raise ValueError(f'Missing training outcome classes: {counts}; collect more real pairs')
     normalization={}
@@ -123,7 +127,10 @@ def main():
     torch.save(exported,a.output/'directional_sensitivity_tcn.pt')
     report=dict(initial_tcn=str(a.initial_tcn),export='directional_sensitivity_tcn.pt',
         inference_changed=False,auxiliary_heads_exported=False,labels=LABELS,class_counts=counts,
-        split_sequences={k:v.tolist() for k,v in groups.items()},selected_step=selected,history=history,test=test,
+        split_sequences={k:np.unique(d['sequence'][ids[k]]).tolist() for k in groups},
+        split_episode_keys={k:v.tolist() for k,v in groups.items()},
+        checkpoint_sha256=hashlib.sha256((a.output/'directional_sensitivity_tcn.pt').read_bytes()).hexdigest(),
+        selected_step=selected,history=history,test=test,
         robot_success_evaluated=False,limitations=['No online four-class gate or explicit Unresolved replanner; original inference unchanged.',
             'Original validity/uncertainty head weights retained, but shared features change; validate original gating in new rollouts.',
             'Successful chunk repair does not prove action-wise causal necessity.'])
