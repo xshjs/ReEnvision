@@ -21,7 +21,7 @@ def install(ns):
     from policy_models.VPP_policy import VPP_Policy
     install_capture(VPP_Policy)
     root=Path(os.environ['REENVISION_STRICT_RUN']);root.mkdir(parents=True,exist_ok=True)
-    rows=root/'pairs.jsonl';count=0;seen=0
+    rows=root/'pairs.jsonl';count=0;seen=0;episode_counts={}
     max_pairs=int(os.environ.get('STRICT_MAX_PAIRS','200'))
     every=int(os.environ.get('STRICT_EVERY','20'))
     original=ns['maybe_save_sensitivity_teacher_row']
@@ -37,6 +37,8 @@ def install(ns):
         while chain_frame and chain_frame.f_code.co_name!='evaluate_sequence_memory':chain_frame=chain_frame.f_back
         if chain_frame is None:raise SystemExit('Full remaining task sequence is unavailable; refusing subtask-only return')
         sequence=[str(x) for x in chain_frame.f_locals['eval_sequence']]
+        epkey=episode_key(chain_frame.f_locals['initial_state'],sequence)
+        if episode_counts.get(epkey,0)>=int(os.environ.get('STRICT_MAX_PAIRS_PER_EPISODE','4')):return None
         sub_index=int(kw['subtask_index'])
         if not 0<=sub_index<len(sequence) or sequence[sub_index]!=kw['task']:
             raise SystemExit('Task-chain position mismatch')
@@ -172,7 +174,7 @@ def install(ns):
                 endpoint_prior=rec[0][0]['endpoint'],endpoint_post=rec[1][0]['endpoint'],physics_start=snapshot.start,
                 noise=original_noise.cpu().numpy(),**capture_arrays)
             info=dict(pair=count,sequence=identity[0],subtask=identity[1],step=identity[2],task=task,
-                episode_key=episode_key(chain_frame.f_locals['initial_state'],sequence),
+                episode_key=epkey,
                 episode_tasks=sequence,candidate_source='belief_counterfactual',tcn_triggered=False,
                 file=file.name,accepted=accepted,outcome=outcome,training_eligible=True,returns_prior=ret0,returns_post=ret1,
                 completion_steps_prior=len(rec[0][0]['actions']),completion_steps_post=len(rec[1][0]['actions']),
@@ -204,6 +206,7 @@ def install(ns):
                 termination_prior=rec[0][0]['termination'],termination_post=rec[1][0]['termination'])
             with rows.open('a') as f:f.write(json.dumps(info)+'\n');f.flush()
             count+=1
+            episode_counts[epkey]=episode_counts.get(epkey,0)+1
             print(f'[strict] pair={count}/{max_pairs} G_cache={ret0[0]:.0f} G_candidate={ret1[0]:.0f} accepted={accepted} full_chain=True remaining_tasks={len(remaining_tasks)}',flush=True)
         except Exception as e:
             (root/'fatal.json').write_text(json.dumps({'error':repr(e),'pair':count},indent=2))
@@ -217,6 +220,8 @@ def install(ns):
             (root/'fatal.json').write_text(json.dumps({'error':repr(e),'attempted':count},indent=2))
             raise SystemExit(f'Strict collection failed closed: {e}') from e
     ns['maybe_save_sensitivity_teacher_row']=guarded_record
+    log_dir=root/'original_logs';log_dir.mkdir(exist_ok=True)
+    if 'get_log_dir' in ns:ns['get_log_dir']=lambda *a,**kw:log_dir
     main=ns['main']
     def frozen_main(cfg):
         cfg.log_wandb=False
