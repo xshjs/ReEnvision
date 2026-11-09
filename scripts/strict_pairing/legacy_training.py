@@ -78,7 +78,18 @@ def main():
         mean=d[k][ids['train']].mean(0);std=np.maximum(d[k][ids['train']].std(0),1e-4)
         normalization[k]=(mean,std);d[k]=(d[k]-mean)/std
     x={k:torch.as_tensor(v,device=a.device,dtype=torch.long if k=='outcome' else torch.float32) for k,v in d.items() if k!='sequence'}
-    model=DirectionalSensitivityTCN(**config).to(a.device);model.load_state_dict(old['model_state'],strict=True)
+    model=DirectionalSensitivityTCN(**config).to(a.device)
+    initial=dict(old['model_state'])
+    head_keys={'validity_proj.weight','validity_proj.bias','uncertainty_proj.weight','uncertainty_proj.bias'}
+    missing=set(model.state_dict())-set(initial)
+    if missing:
+        if missing!=head_keys or old.get('has_validity_head',False):
+            raise ValueError(f'Incompatible original TCN weights: missing {sorted(missing)}')
+        # Old delta-only checkpoint: satisfy the existing loader schema without
+        # fabricating trained auxiliary predictions or changing delta weights.
+        for key in head_keys:initial[key]=torch.zeros_like(model.state_dict()[key])
+        old=dict(old,has_validity_head=False)
+    model.load_state_dict(initial,strict=True)
     # Extra classification/risk heads exist only while training; NEVER exported.
     aux=nn.Linear(config['hidden_dim'],5).to(a.device)
     for module in [model.validity_proj,model.uncertainty_proj]:module.requires_grad_(False)
