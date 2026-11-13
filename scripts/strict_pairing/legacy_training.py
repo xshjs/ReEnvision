@@ -1,4 +1,4 @@
-"""Four-outcome training ONLY; export the unchanged original TCN interface."""
+"""Return-filtered Repair-only regression; unchanged original TCN interface."""
 import argparse
 import ast
 import hashlib
@@ -7,10 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.nn import functional as F
 from train import load,DirectionalSensitivityTCN
 from paths import defi_root
-from outcome import LABELS
 
 
 def runtime_helpers():
@@ -62,7 +60,8 @@ def main():
     defaults=dict(hidden_dim=128,cond_dim=256,num_blocks=3,kernel_size=3,dropout=.05,output_scale=1.)
     config={k:old[k] for k in required};config.update({k:old.get(k,v) for k,v in defaults.items()})
     if config['action_dim']!=7 or config['chunk_len']!=10:raise ValueError('Collector supports 10x7 cache only')
-    d,rows=load(a.run,a.min_pairs,a.min_sequences,all_outcomes=True)
+    d,allrows=load(a.run,a.min_pairs,a.min_sequences,all_outcomes=False)
+    rows=[r for r in allrows if r['accepted']]
     d=legacy_inputs(a.run,d,rows,config)
     if any(not row.get('episode_key') for row in rows):raise ValueError('Recollect data with stable episode keys before claiming held-out evaluation')
     epkeys=np.asarray([r['episode_key'] for r in rows])
@@ -71,8 +70,7 @@ def main():
     rng.shuffle(seq);n=max(1,len(seq)//5)
     groups={'test':seq[:n],'validation':seq[n:2*n],'train':seq[2*n:]}
     ids={k:np.flatnonzero(np.isin(epkeys,v)) for k,v in groups.items()}
-    counts={k:np.bincount(d['outcome'][i],minlength=4).tolist() for k,i in ids.items()}
-    if min(counts['train'])==0:raise ValueError(f'Missing training outcome classes: {counts}; collect more real pairs')
+    counts={k:len(i) for k,i in ids.items()}
     normalization={}
     for k in ['state','belief','delta_belief']:
         mean=d[k][ids['train']].mean(0);std=np.maximum(d[k][ids['train']].std(0),1e-4)
@@ -90,54 +88,43 @@ def main():
         for key in head_keys:initial[key]=torch.zeros_like(model.state_dict()[key])
         old=dict(old,has_validity_head=False)
     model.load_state_dict(initial,strict=True)
-    # Extra classification/risk heads exist only while training; NEVER exported.
-    aux=nn.Linear(config['hidden_dim'],5).to(a.device)
+    # No outcome/risk auxiliary objectives. Retain original head weights/schema.
     for module in [model.validity_proj,model.uncertainty_proj]:module.requires_grad_(False)
-    opt=torch.optim.AdamW([p for p in model.parameters() if p.requires_grad]+list(aux.parameters()),lr=1e-4,weight_decay=1e-4)
+    opt=torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],lr=1e-4,weight_decay=1e-4)
     def average(v,m):return (v*m).sum()/m.sum().clamp_min(1)
     def forward(i):
         features=model._features(*(x[k][i] for k in ['state','belief','action','delta_belief','task','meta']))
-        length=torch.tensor([rows[j]['horizon'] for j in i],device=a.device)
-        known=(torch.arange(10,device=a.device)[None,:]<length[:,None]).float()
-        pooled=(features*known[:,None,:]).sum(-1)/known.sum(-1,keepdim=True).clamp_min(1)
-        return model.out_proj(features).transpose(1,2)*model.output_scale,aux(pooled)
-    def objective(pred,heads,i):
-        y=x['outcome'][i];mask=x['mask'][i]
-        repair=(y==0).float()[:,None]*mask
-        preserve=(y==1).float()[:,None]*mask;harmful=(y==3).float()[:,None]*mask
-        reg=average(((pred-x['target'][i])/.003).square().mean(-1),repair)
-        zero=(pred/.003).square().mean(-1)
-        # Unresolved has no known successful direction: auxiliary loss only, NOT zero target.
-        return reg+.1*average(zero,preserve)+average(zero,harmful)+F.cross_entropy(heads[:,:4],y)+F.binary_cross_entropy_with_logits(heads[:,4],(y==3).float())
+        return model.out_proj(features).transpose(1,2)*model.output_scale
+    def objective(pred,i):
+        return average(((pred-x['target'][i])/.003).square().mean(-1),x['mask'][i])
     def metrics(i):
-        model.eval();aux.eval()
+        model.eval()
         with torch.no_grad():
-            pred,heads=forward(i);y=x['outcome'][i];repair=(y==0).float()[:,None]*x['mask'][i]
-            return dict(loss=float(objective(pred,heads,i)),repair_mse=float(average((pred-x['target'][i]).square().mean(-1),repair)),
-                auxiliary_accuracy=float((heads[:,:4].argmax(-1)==y).float().mean()),
-                harmful_delta_norm=float(average(pred.norm(dim=-1),(y==3).float()[:,None]*x['mask'][i])),
-                preserve_delta_norm=float(average(pred.norm(dim=-1),(y==1).float()[:,None]*x['mask'][i])))
-    train=ids['train'];ratios=np.array([.4,.3,.15,.15]);weights=ratios[d['outcome'][train]]/np.array(counts['train'])[d['outcome'][train]];weights/=weights.sum()
+            pred=forward(i);mask=x['mask'][i]
+            return dict(loss=float(objective(pred,i)),repair_mse=float(average((pred-x['target'][i]).square().mean(-1),mask)),
+                zero_correction_mse=float(average(x['target'][i].square().mean(-1),mask)))
+    train=ids['train']
     best=float('inf');saved=None;selected=0;history=[]
     for step in range(1,a.steps+1):
-        model.train();aux.train();i=rng.choice(train,size=min(64,len(train)),replace=True,p=weights)
-        pred,heads=forward(i);loss=objective(pred,heads,i);opt.zero_grad();loss.backward()
-        nn.utils.clip_grad_norm_(list(model.parameters())+list(aux.parameters()),1);opt.step()
+        model.train();i=rng.choice(train,size=min(64,len(train)),replace=True)
+        pred=forward(i);loss=objective(pred,i);opt.zero_grad();loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(),1);opt.step()
         if step%100==0 or step==a.steps:
             result=metrics(ids['validation']);history.append(dict(step=step,**result));print(json.dumps(history[-1]),flush=True)
             if result['loss']<best:
                 best=result['loss'];selected=step
-                saved=({k:v.detach().cpu().clone() for k,v in model.state_dict().items()},
-                       {k:v.detach().cpu().clone() for k,v in aux.state_dict().items()})
-    model.load_state_dict(saved[0]);aux.load_state_dict(saved[1]);test=metrics(ids['test'])
+                saved={k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
+    model.load_state_dict(saved);test=metrics(ids['test'])
     a.output.mkdir(parents=True)
-    exported=dict(old);exported.update(config);exported['model_state']=saved[0]
+    exported=dict(old);exported.update(config);exported['model_state']=saved
     for key,prefix in [('state','state'),('belief','h'),('delta_belief','delta_h')]:
         exported[prefix+'_mean'],exported[prefix+'_std']=normalization[key]
-    exported['training_method']='four_outcome_auxiliary_original_inference_unchanged'
+    exported['training_method']='return_filtered_repair_only_original_inference_unchanged'
     torch.save(exported,a.output/'directional_sensitivity_tcn.pt')
     report=dict(initial_tcn=str(a.initial_tcn),export='directional_sensitivity_tcn.pt',
-        inference_changed=False,auxiliary_heads_exported=False,labels=LABELS,class_counts=counts,
+        inference_changed=False,auxiliary_heads_exported=False,auxiliary_losses=False,
+        pair_filter='original failure 0 -> candidate success 1; full remaining chain',
+        accepted_pairs=len(rows),recorded_pairs=len(allrows),split_pair_counts=counts,
         split_sequences={k:np.unique(d['sequence'][ids[k]]).tolist() for k in groups},
         split_episode_keys={k:v.tolist() for k,v in groups.items()},
         checkpoint_sha256=hashlib.sha256((a.output/'directional_sensitivity_tcn.pt').read_bytes()).hexdigest(),
